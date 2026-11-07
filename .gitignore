@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Local runtime state and caches (written by the widgets at run time)
+widget-settings.json
+widget-runtime.json
+widget-error.log
+usage-cache.json
+*.log
+
+# Build output (rebuild with build-launcher.ps1)
+*.exe
+bin/
+obj/
+*.pdb
+
+# Credentials and local environment
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+auth.json
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Claude Code local settings
+.claude/settings.local.json

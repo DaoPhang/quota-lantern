@@ -1,0 +1,14 @@
+{
+  "name": "codex-usage-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A native Windows widget for Codex remaining allowance",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "\"./Codex Widget.exe\"",
+    "test": "node --test tests/*.test.mjs",
+    "startup:enable": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./startup.ps1",
+    "startup:disable": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./startup.ps1 -Remove"
+  }
+}
