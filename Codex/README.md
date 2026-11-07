@@ -6,7 +6,7 @@ A compact native Windows desktop widget with circular meters for your **5-hour**
 
 Requires Windows, Windows PowerShell 5.1 (included with Windows), and Node.js 22 or newer on PATH. No npm packages, API key, browser, or HTTP server are needed.
 
-Double-click **Codex Widget.exe** or run `npm start`. **Start Widget.cmd** and the previous **Start Usage UI.cmd** also open the native widget. Keep the executable beside `widget.ps1` and the other project files. Only one widget instance runs at a time. The widget stays on top by default; change this in its options menu.
+Build the launcher once from this folder with `powershell -NoProfile -ExecutionPolicy Bypass -File .\build-launcher.ps1`. That creates **Codex Widget.exe** beside the project files. Then double-click **Codex Widget.exe** or run `npm start`. **Start Widget.cmd** and the previous **Start Usage UI.cmd** also open the native widget once it is built. Keep the executable beside `widget.ps1` and the other project files. Only one widget instance runs at a time. The widget stays on top by default; change this in its options menu.
 
 - Drag the Codex header to move it. Position is saved in `widget-settings.json`.
 - Click the refresh arrow or press F5 to update. Automatic refresh runs every 30 seconds.
