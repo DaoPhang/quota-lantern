@@ -34,19 +34,31 @@ function Save-Settings {
   } catch { } # Read-only folders must not prevent the widget from closing.
 }
 
-function Set-Ring($arc, $value) {
+# Two Activity-style rings share one center: the outer ring is the 5-hour limit, the inner ring the 1-week limit.
+# Both start at twelve o'clock and sweep clockwise in proportion to the remaining allowance.
+$script:ringCenter = [Windows.Point]::new(66, 66)
+
+function Get-RingPoint($angle, $radius) {
+  $radians = $angle * [Math]::PI / 180
+  [Windows.Point]::new($script:ringCenter.X + $radius * [Math]::Sin($radians), $script:ringCenter.Y - $radius * [Math]::Cos($radians))
+}
+
+function Get-Fraction($value) {
+  if ($null -eq $value) { return [double]0 }
+  [Math]::Min([double]1, [Math]::Max([double]0, [double]$value / 100))
+}
+
+function Set-Ring($name, $radius, $value, $opacity) {
+  $arc = $script:window.FindName($name)
+  $arc.Opacity = $opacity
+  # An unknown or empty allowance draws no arc, so it is never mistaken for a reading.
   if ($null -eq $value -or $value -le 0) { $arc.Data = $null; return }
-  $fraction = [Math]::Min([double]1, [Math]::Max([double]0, [double]$value / 100))
-  if ($fraction -ge 1) {
-    $arc.Data = [Windows.Media.EllipseGeometry]::new([Windows.Point]::new(66, 66), 52, 52)
-    return
-  }
-  $angle = 2 * [Math]::PI * $fraction
-  $end = [Windows.Point]::new(66 + 52 * [Math]::Sin($angle), 66 - 52 * [Math]::Cos($angle))
+  # A full circle cannot be drawn as a single arc, so stop a hair short of 360 degrees.
+  $sweep = 360 * [Math]::Min((Get-Fraction $value), 0.9999)
   $figure = [Windows.Media.PathFigure]::new()
-  $figure.StartPoint = [Windows.Point]::new(66, 14)
-  $segment = [Windows.Media.ArcSegment]::new($end, [Windows.Size]::new(52, 52), 0,
-    ($fraction -gt 0.5), [Windows.Media.SweepDirection]::Clockwise, $true)
+  $figure.StartPoint = Get-RingPoint 0 $radius
+  $segment = [Windows.Media.ArcSegment]::new((Get-RingPoint $sweep $radius),
+    [Windows.Size]::new($radius, $radius), 0, ($sweep -gt 180), [Windows.Media.SweepDirection]::Clockwise, $true)
   $figure.Segments.Add($segment)
   $geometry = [Windows.Media.PathGeometry]::new()
   $geometry.Figures.Add($figure)
@@ -87,13 +99,19 @@ function Render-Usage {
       if ($isExpired) { $expired = $true } else { $value = $limit.remainingPercent }
     }
     $label = $script:window.FindName($prefix + 'Value')
-    $arc = $script:window.FindName($prefix + 'Arc')
     $reset = $script:window.FindName($prefix + 'Reset')
     $label.Text = if ($null -eq $value) { '--' } else { ('{0:0.#}%' -f $value) }
     $label.ToolTip = if ($null -eq $value) { 'Allowance unknown. Refresh for a new reading.' } else { "$value% remaining" }
     [Windows.Automation.AutomationProperties]::SetName($label, "$prefix allowance: $($label.ToolTip)")
-    Set-Ring $arc $value
-    $arc.Opacity = if ($script:disconnected -or $snapshot.source -ne 'live') { 0.65 } else { 1 }
+    $opacity = if ($script:disconnected -or $snapshot.source -ne 'live') { 0.65 } else { 1 }
+    if ($prefix -eq 'Primary') {
+      Set-Ring 'PrimaryArc' 57 $value $opacity
+      $script:primaryText = $label.ToolTip
+    } else {
+      Set-Ring 'WeeklyArc' 42 $value $opacity
+      [Windows.Automation.AutomationProperties]::SetName($script:window.FindName('Gauge'),
+        "Allowance rings. 5-hour: $($script:primaryText). 1-week: $($label.ToolTip)")
+    }
     $reset.Text = if ($limit) { Format-Reset $limit.resetsAt } else { 'Waiting for data' }
     $reset.ToolTip = if ($limit -and $limit.resetsAt) { [DateTimeOffset]::Parse($limit.resetsAt).ToLocalTime().ToString('f') } else { 'No reset reported' }
   }
@@ -110,7 +128,9 @@ function Render-Usage {
     $status += " - $ageText"
   }
   $script:window.FindName('StatusText').Text = $status
-  $script:window.FindName('StatusDot').Fill = if ($live -and -not $expired) { '#79E2BD' } else { '#D8B77A' }
+  $script:window.FindName('StatusBadge').Text = if ($script:disconnected -or $snapshot.source -eq 'unavailable') { 'Offline' }
+    elseif ($expired) { 'Expired' } elseif ($live) { 'Live' } else { 'Stale' }
+  $script:window.FindName('StatusDot').Fill = if ($live -and -not $expired) { '#4ADE80' } else { '#FFB84D' }
   $script:window.FindName('Surface').ToolTip = (@($snapshot.notice, $(if ($snapshot.observedAt) {
     'Reported ' + [DateTimeOffset]::Parse($snapshot.observedAt).ToLocalTime().ToString('f')
   })) | Where-Object { $_ }) -join "`n"

@@ -1,7 +1,9 @@
 param(
   [string]$PreviewPath,
   [string]$VerifyPath,
-  [ValidateSet('live', 'stale', 'unknown', 'expired', 'zero', 'full')][string]$PreviewState = 'live'
+  [ValidateSet('live', 'stale', 'unknown', 'expired', 'zero', 'full')][string]$PreviewState = 'live',
+  [switch]$PreviewExpanded,
+  [ValidateSet('system', 'light', 'dark')][string]$PreviewTheme = 'system'
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
@@ -15,6 +17,28 @@ $script:mutex = $null
 # Give the widget its own taskbar identity so Windows does not group it under powershell.exe and show PowerShell's icon.
 Add-Type -Namespace Native -Name Shell -MemberDefinition '[System.Runtime.InteropServices.DllImport("shell32.dll")] public static extern int SetCurrentProcessExplicitAppUserModelID(string appId);'
 [void][Native.Shell]::SetCurrentProcessExplicitAppUserModelID('Claude.UsageWidget')
+# Idle detection lets the reader slow down while nobody is at the PC.
+Add-Type -Namespace Native -Name Idle -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+[DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO info);
+'@
+function Get-IdleSeconds {
+  $info = New-Object Native.Idle+LASTINPUTINFO
+  $info.cbSize = 8
+  if (-not [Native.Idle]::GetLastInputInfo([ref]$info)) { return 0 }
+  $tick = [long][Environment]::TickCount -band 0xFFFFFFFFL
+  $delta = $tick - [long]$info.dwTime
+  if ($delta -lt 0) { $delta += 4294967296 }
+  [double]$delta / 1000
+}
+$script:idleSent = $false
+
+function Send-Worker($command) {
+  try {
+    if ($script:worker -and -not $script:worker.HasExited) { $script:worker.StandardInput.WriteLine($command); $script:worker.StandardInput.Flush() }
+  } catch { }
+}
+
 function Write-Diagnostic($stage) {
   @{ stage = $stage; pid = $PID; at = [DateTime]::UtcNow.ToString('o') } |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $script:root 'widget-runtime.json') -Encoding UTF8
@@ -27,6 +51,9 @@ if (-not $PreviewPath) {
   if (-not $created) { $script:mutex.Dispose(); exit }
 }
 
+# Quitting closes the only window, which ends the worker process and releases the single-instance mutex.
+function Quit-Widget { $script:window.Close() }
+
 function Save-Settings {
   try {
     @{ left = $script:window.Left; top = $script:window.Top; topmost = $script:window.Topmost } |
@@ -34,19 +61,55 @@ function Save-Settings {
   } catch { } # Read-only folders must not prevent the widget from closing.
 }
 
-function Set-Ring($arc, $value) {
-  if ($null -eq $value -or $value -le 0) { $arc.Data = $null; return }
-  $fraction = [Math]::Min([double]1, [Math]::Max([double]0, [double]$value / 100))
-  if ($fraction -ge 1) {
-    $arc.Data = [Windows.Media.EllipseGeometry]::new([Windows.Point]::new(66, 66), 52, 52)
-    return
+# The ring shows the 5-hour limit. It starts at twelve o'clock and sweeps clockwise in proportion to the remaining allowance.
+$script:ringCenter = [Windows.Point]::new(22, 22)
+
+# The widget follows the Windows app theme (Settings > Personalization > Colors > Choose your mode).
+$script:themes = @{
+  dark = @{ CardBg = '#1F1E1D'; CardBorder = '#3A3936'; TextPrimary = '#FAF9F5'; TextSecondary = '#B5B2A9'; Accent = '#D97757'
+    RingTrack = '#3A2A24'; BarTrack = '#33322F'; Divider = '#3A3936'; ButtonBg = '#2C2B29'; ButtonHover = '#3D3B38' }
+  light = @{ CardBg = '#FAF9F5'; CardBorder = '#D9D5C7'; TextPrimary = '#141413'; TextSecondary = '#5E5B52'; Accent = '#C4623F'
+    RingTrack = '#EBD9D0'; BarTrack = '#E6E2D6'; Divider = '#D9D5C7'; ButtonBg = '#ECE9DF'; ButtonHover = '#DDD9CC' }
+}
+$script:themeName = $null
+
+function Get-SystemTheme {
+  try {
+    $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+    if ((Get-ItemProperty -LiteralPath $key -Name AppsUseLightTheme -ErrorAction Stop).AppsUseLightTheme -eq 1) { return 'light' }
+  } catch { }
+  'dark'
+}
+
+function Set-Theme($name) {
+  if ($name -eq $script:themeName) { return }
+  $script:themeName = $name
+  foreach ($entry in $script:themes[$name].GetEnumerator()) {
+    $script:window.Resources[$entry.Key] = [Windows.Media.SolidColorBrush]::new([Windows.Media.ColorConverter]::ConvertFromString($entry.Value))
   }
-  $angle = 2 * [Math]::PI * $fraction
-  $end = [Windows.Point]::new(66 + 52 * [Math]::Sin($angle), 66 - 52 * [Math]::Cos($angle))
+}
+
+function Get-RingPoint($angle, $radius) {
+  $radians = $angle * [Math]::PI / 180
+  [Windows.Point]::new($script:ringCenter.X + $radius * [Math]::Sin($radians), $script:ringCenter.Y - $radius * [Math]::Cos($radians))
+}
+
+function Get-Fraction($value) {
+  if ($null -eq $value) { return [double]0 }
+  [Math]::Min([double]1, [Math]::Max([double]0, [double]$value / 100))
+}
+
+function Set-Ring($name, $radius, $value, $opacity) {
+  $arc = $script:window.FindName($name)
+  $arc.Opacity = $opacity
+  # An unknown or empty allowance draws no arc, so it is never mistaken for a reading.
+  if ($null -eq $value -or $value -le 0) { $arc.Data = $null; return }
+  # A full circle cannot be drawn as a single arc, so stop a hair short of 360 degrees.
+  $sweep = 360 * [Math]::Min((Get-Fraction $value), 0.9999)
   $figure = [Windows.Media.PathFigure]::new()
-  $figure.StartPoint = [Windows.Point]::new(66, 14)
-  $segment = [Windows.Media.ArcSegment]::new($end, [Windows.Size]::new(52, 52), 0,
-    ($fraction -gt 0.5), [Windows.Media.SweepDirection]::Clockwise, $true)
+  $figure.StartPoint = Get-RingPoint 0 $radius
+  $segment = [Windows.Media.ArcSegment]::new((Get-RingPoint $sweep $radius),
+    [Windows.Size]::new($radius, $radius), 0, ($sweep -gt 180), [Windows.Media.SweepDirection]::Clockwise, $true)
   $figure.Segments.Add($segment)
   $geometry = [Windows.Media.PathGeometry]::new()
   $geometry.Figures.Add($figure)
@@ -63,14 +126,71 @@ function Format-Reset($reset) {
   return "Resets in ${minutes}m"
 }
 
+function Format-ResetShort($reset) {
+  if (-not $reset) { return '--' }
+  $delta = ([DateTimeOffset]::Parse($reset) - [DateTimeOffset]::UtcNow).TotalMinutes
+  if ($delta -le 0) { return 'reset due' }
+  $minutes = [int][Math]::Ceiling($delta)
+  if ($minutes -ge 1440) { return ('{0}d {1}h' -f [Math]::Floor($minutes / 1440), [Math]::Floor(($minutes % 1440) / 60)) }
+  if ($minutes -ge 60) { return ('{0}h {1}m' -f [Math]::Floor($minutes / 60), ($minutes % 60)) }
+  "${minutes}m"
+}
+
 function Export-Widget($path) {
   $script:window.UpdateLayout()
-  $bitmap = [Windows.Media.Imaging.RenderTargetBitmap]::new(352, 292, 96, 96, [Windows.Media.PixelFormats]::Pbgra32)
+  $bitmap = [Windows.Media.Imaging.RenderTargetBitmap]::new([int]$script:window.Width, [int]$script:window.Height, 96, 96, [Windows.Media.PixelFormats]::Pbgra32)
   $bitmap.Render($script:window)
   $encoder = [Windows.Media.Imaging.PngBitmapEncoder]::new()
   $encoder.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($bitmap))
   $stream = [IO.File]::Create($path)
   try { $encoder.Save($stream) } finally { $stream.Dispose() }
+}
+
+# Collapsed by default; the strip's arrow button reveals the per-product share of this week's usage.
+$script:collapsedHeight = 76
+$script:breakdownExpanded = $false
+
+function Set-Breakdown($expanded) {
+  $script:breakdownExpanded = $expanded
+  $panel = $script:window.FindName('BreakdownPanel')
+  $button = $script:window.FindName('ExpandButton')
+  $panel.Visibility = if ($expanded) { 'Visible' } else { 'Collapsed' }
+  $script:window.Height = $script:collapsedHeight + $(if ($expanded) { $panel.Height + $panel.Margin.Top } else { 0 })
+  $button.Content = if ($expanded) { [string][char]0x25B4 } else { [string][char]0x25BE }
+  $tip = if ($expanded) { 'Hide usage by product' } else { 'Show usage by product' }
+  $button.ToolTip = $tip
+  [Windows.Automation.AutomationProperties]::SetName($button, $tip)
+  if ($expanded) { Send-Worker 'expand' }
+  # Keep the widget fully on screen when it grows downward.
+  $area = [Windows.SystemParameters]::WorkArea
+  if ($script:window.Top + $script:window.Height -gt $area.Bottom) { $script:window.Top = [Math]::Max($area.Top, $area.Bottom - $script:window.Height) }
+}
+
+function Render-Breakdown {
+  $snapshot = $script:snapshot
+  $weekly = $snapshot.windows[1]
+  # Shares belong to the weekly window, so they are unknown once that window has passed its reset.
+  $known = $snapshot.breakdown -and $weekly -and -not $weekly.expired -and
+    -not ($weekly.resetsAt -and [DateTimeOffset]::Parse($weekly.resetsAt) -le [DateTimeOffset]::UtcNow)
+  $rows = if ($known) { @($snapshot.breakdown) } else { @() }
+  for ($i = 0; $i -lt 4; $i++) {
+    $row = $script:window.FindName("Brk${i}Row")
+    $name = $script:window.FindName("Brk${i}Name"); $pct = $script:window.FindName("Brk${i}Pct")
+    $fill = $script:window.FindName("Brk${i}Fill"); $rest = $script:window.FindName("Brk${i}Rest")
+    $item = if ($i -lt $rows.Count) { $rows[$i] } else { $null }
+    if (-not $item -and $rows.Count -gt 0) { $row.Visibility = 'Collapsed'; continue }
+    $row.Visibility = 'Visible'
+    if ($item) {
+      $value = [Math]::Min(100.0, [Math]::Max(0.0, [double]$item.percent))
+      $name.Text = $item.label; $pct.Text = ('{0:0.#}%' -f $value)
+      $fill.Width = [Windows.GridLength]::new($value, 'Star'); $rest.Width = [Windows.GridLength]::new(100 - $value, 'Star')
+      [Windows.Automation.AutomationProperties]::SetName($row, "$($item.label): $($pct.Text) of this week's usage")
+    } else {
+      $name.Text = @('Claude Code', 'Chats', 'Cowork', 'Other')[$i]; $pct.Text = '--'
+      $fill.Width = [Windows.GridLength]::new(0, 'Star'); $rest.Width = [Windows.GridLength]::new(1, 'Star')
+      [Windows.Automation.AutomationProperties]::SetName($row, "$($name.Text): unknown")
+    }
+  }
 }
 
 function Render-Usage {
@@ -87,20 +207,27 @@ function Render-Usage {
       if ($isExpired) { $expired = $true } else { $value = $limit.remainingPercent }
     }
     $label = $script:window.FindName($prefix + 'Value')
-    $arc = $script:window.FindName($prefix + 'Arc')
     $reset = $script:window.FindName($prefix + 'Reset')
     $label.Text = if ($null -eq $value) { '--' } else { ('{0:0.#}%' -f $value) }
     $label.ToolTip = if ($null -eq $value) { 'Allowance unknown. Refresh for a new reading.' } else { "$value% remaining" }
     [Windows.Automation.AutomationProperties]::SetName($label, "$prefix allowance: $($label.ToolTip)")
-    Set-Ring $arc $value
-    $arc.Opacity = if ($script:disconnected -or $snapshot.source -ne 'live') { 0.65 } else { 1 }
-    $reset.Text = if ($limit) { Format-Reset $limit.resetsAt } else { 'Waiting for data' }
+    $opacity = if ($script:disconnected -or $snapshot.source -ne 'live') { 0.65 } else { 1 }
+    if ($prefix -eq 'Primary') {
+      Set-Ring 'PrimaryArc' 17 $value $opacity
+      [Windows.Automation.AutomationProperties]::SetName($script:window.FindName('Gauge'), "5-hour allowance ring: $($label.ToolTip)")
+    }
+    $label.Opacity = $opacity
+    $caption = if ($prefix -eq 'Primary') { '5-hour' } else { 'Weekly' }
+    $reset.Text = "$caption " + [char]0x00B7 + ' ' + $(if ($limit) { Format-ResetShort $limit.resetsAt } else { '--' })
     $reset.ToolTip = if ($limit -and $limit.resetsAt) { [DateTimeOffset]::Parse($limit.resetsAt).ToLocalTime().ToString('f') } else { 'No reset reported' }
   }
+  Render-Breakdown
   $age = if ($snapshot.observedAt) { ([DateTimeOffset]::UtcNow - [DateTimeOffset]::Parse($snapshot.observedAt)).TotalSeconds } else { [double]::PositiveInfinity }
-  $live = $snapshot.source -eq 'live' -and $age -le 120 -and -not $script:disconnected
+  $live = $snapshot.source -eq 'live' -and $age -le 300 -and -not $script:disconnected
   $status = if ($script:disconnected) { 'Disconnected - retrying' }
     elseif ($snapshot.source -eq 'unavailable') { 'Unavailable - sign in to Claude Code' }
+    elseif ($snapshot.retryAt -and [DateTimeOffset]::Parse($snapshot.retryAt) -gt [DateTimeOffset]::UtcNow) {
+      'Rate limited - retry ' + [DateTimeOffset]::Parse($snapshot.retryAt).ToLocalTime().ToString('h:mm tt') }
     elseif ($expired) { 'Awaiting reset confirmation' }
     elseif ($live) { 'Live account data' }
     else { 'Last known data' }
@@ -110,7 +237,7 @@ function Render-Usage {
     $status += " - $ageText"
   }
   $script:window.FindName('StatusText').Text = $status
-  $script:window.FindName('StatusDot').Fill = if ($live -and -not $expired) { '#7FD9A0' } else { '#D8B77A' }
+  $script:window.FindName('StatusDot').Fill = if ($live -and -not $expired) { '#4ADE80' } else { '#FFB84D' }
   $script:window.FindName('Surface').ToolTip = (@($snapshot.notice, $(if ($snapshot.observedAt) {
     'Reported ' + [DateTimeOffset]::Parse($snapshot.observedAt).ToLocalTime().ToString('f')
   })) | Where-Object { $_ }) -join "`n"
@@ -169,9 +296,16 @@ try {
         [pscustomobject]@{remainingPercent = $v1; resetsAt = $now.AddMinutes(177).ToString('o'); expired = ($PreviewState -eq 'expired')},
         [pscustomobject]@{remainingPercent = $v2; resetsAt = $now.AddDays(4).AddHours(2).ToString('o'); expired = $false})
     }
+    $script:snapshot | Add-Member breakdown @(
+      [pscustomobject]@{label = 'Claude Code'; percent = $(if ($PreviewState -eq 'zero') { 0 } else { 79 })},
+      [pscustomobject]@{label = 'Chats'; percent = 0},
+      [pscustomobject]@{label = 'Cowork'; percent = $(if ($PreviewState -eq 'zero') { 0 } else { 21 })},
+      [pscustomobject]@{label = 'Other'; percent = 0})
     if ($PreviewState -eq 'unknown') { $script:snapshot.windows = @($null, $null); $script:snapshot.observedAt = $null }
     if ($PreviewState -eq 'expired') { $script:snapshot.windows[0].resetsAt = $now.AddSeconds(-1).ToString('o') }
+    Set-Theme $(if ($PreviewTheme -eq 'system') { Get-SystemTheme } else { $PreviewTheme })
     Render-Usage
+    Set-Breakdown ([bool]$PreviewExpanded)
     $script:window.ShowActivated = $false
     $script:window.Show()
     Export-Widget $PreviewPath
@@ -198,14 +332,16 @@ try {
   })
   $menu.Items.Add($startup) | Out-Null
   $quit = [Windows.Controls.MenuItem]::new(); $quit.Header = 'Quit'
-  $quit.Add_Click({ $script:window.Close() })
+  $quit.Add_Click({ Quit-Widget })
   $menu.Items.Add($quit) | Out-Null
   $script:window.FindName('MenuButton').ContextMenu = $menu
+  $script:window.FindName('Surface').ContextMenu = $menu # right-click anywhere on the strip
   $script:window.FindName('MenuButton').Add_Click({ $menu.IsOpen = $true })
-  $script:window.FindName('CloseButton').Add_Click({ $script:window.Close() })
+  $script:window.FindName('QuitButton').Add_Click({ Quit-Widget })
   $script:window.FindName('DragHandle').Add_MouseLeftButtonDown({
     if ($_.ButtonState -eq 'Pressed') { $script:window.DragMove(); Save-Settings }
   })
+  $script:window.FindName('ExpandButton').Add_Click({ Set-Breakdown (-not $script:breakdownExpanded) })
   $script:window.FindName('RefreshButton').Add_Click({
     try {
       if (-not $script:worker -or $script:worker.HasExited) { Start-Worker }
@@ -215,12 +351,15 @@ try {
   })
   $script:window.Add_KeyDown({
     if ($_.Key -eq 'F5') { $script:window.FindName('RefreshButton').RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent)) }
-    if ($_.Key -eq 'Escape') { $script:window.Close() }
+    if ($_.Key -eq 'Escape') { Quit-Widget }
   })
 
   $script:retryAt = [DateTime]::UtcNow
   $script:verifyDeadline = [DateTime]::UtcNow.AddSeconds(25)
   $script:lastRender = [DateTime]::MinValue
+  $script:lastThemeCheck = [DateTime]::MinValue
+  $script:lastIdleCheck = [DateTime]::UtcNow
+  Set-Theme (Get-SystemTheme)
   $timer = [Windows.Threading.DispatcherTimer]::new()
   $timer.Interval = [TimeSpan]::FromMilliseconds(250)
   $timer.Add_Tick({
@@ -239,6 +378,15 @@ try {
         $script:disconnected = $true
         $script:retryAt = [DateTime]::UtcNow.AddSeconds(30)
         Start-Worker
+      }
+      if (([DateTime]::UtcNow - $script:lastIdleCheck).TotalSeconds -ge 10) {
+        $script:lastIdleCheck = [DateTime]::UtcNow
+        $isIdle = (Get-IdleSeconds) -ge 300
+        if ($isIdle -ne $script:idleSent) { $script:idleSent = $isIdle; Send-Worker $(if ($isIdle) { 'idle' } else { 'active' }) }
+      }
+      if (([DateTime]::UtcNow - $script:lastThemeCheck).TotalSeconds -ge 3) {
+        Set-Theme (Get-SystemTheme)
+        $script:lastThemeCheck = [DateTime]::UtcNow
       }
       if (([DateTime]::UtcNow - $script:lastRender).TotalSeconds -ge 1) {
         Render-Usage

@@ -1,6 +1,6 @@
 ﻿# Codex usage widget
 
-A compact native Windows desktop widget with circular meters for your **5-hour** and **1-week** Codex allowances, percentages remaining, and reset countdowns. Inspired by [this circular usage widget](https://www.reddit.com/r/codex/comments/1tfb3mk/i_used_codex_from_my_iphone_to_build_a_codex/).
+A compact native Windows desktop widget that shows your **5-hour** Codex allowance on a car-style fuel gauge and your **1-week** allowance on a segmented status bar, with percentages remaining and reset countdowns. Originally inspired by [this circular usage widget](https://www.reddit.com/r/codex/comments/1tfb3mk/i_used_codex_from_my_iphone_to_build_a_codex/).
 
 ## Open the widget
 
@@ -31,7 +31,7 @@ Green status means fresh live account data. **Last known data** identifies fallb
 ## Development and validation
 
 - `widget.xaml`: WPF layout and styling.
-- `widget.ps1`: rings, freshness, settings, and child-process lifecycle.
+- `widget.ps1`: gauge, status bar, freshness, settings, and child-process lifecycle.
 - `usage-worker.mjs`: private JSON pipe, polling, and refresh commands.
 - `usage.mjs`: authentication, live/local normalization, fallback, and cache.
 - `startup.ps1`: per-user startup registration.

@@ -1,11 +1,13 @@
-﻿# Codex desktop widget
+# Claude desktop widget
 
-Use a compact 352 x 292 native WPF window with a dark rounded surface. Two equal circular meters show independent allowances: coral (#E8A07F) for the 5-hour window and sky blue (#8FB8E8) for the week. Percentages explicitly mean **remaining**. The circular widget linked in README.md is the inspiration; the Windows implementation is an adaptation.
+A native WPF glance strip: a 352 x 76 pill that stays out of the way and expands downward (to 352 x 260) into this week's usage by product. Percentages always mean **remaining** allowance.
 
-Surface: #191B24. Border: #373A47. Primary ring: #E8A07F. Weekly ring: #8FB8E8. Live dot: #7FD9A0. Primary text: #F5F7FC. Supporting text: #939AAE. Use local Segoe UI and Consolas for the Claude asterisk mark. No external fonts, images, or UI dependencies.
+Collapsed: a ring for the 5-hour window (clockwise from twelve o'clock), then the 5-hour percentage with `5-hour · <time to reset>`, a divider, and the weekly percentage with `Weekly · <time to reset>`. The arrow button on the right expands the strip. The small dot on the ring is the freshness indicator: green = live, amber = last known, offline, or awaiting a reset. Dimmed values mean the data is not live.
 
-Read clockwise from twelve o'clock. Zero has an empty ring; 100% has a complete ring. Missing or expired allowance shows `--`, never a fabricated reset to 100%. Keep each reset countdown and exact local timestamp tooltip.
+Expanded: "This week's usage by product" with four bars (Claude Code, Chats, Cowork, Other), then a footer with the full status text and the options, refresh and quit buttons. Always starts collapsed.
 
-The footer communicates live, last known, unavailable, and disconnected states through text and color. Drag the header to move. Options control pinning, startup, and quitting. Keyboard access includes Tab navigation, F5 refresh, and Escape to close. Preserve accessible control names.
+Theme follows Windows (Settings > Personalization > Colors > app mode) and updates within a few seconds of a change. Dark: surface #1F1E1D, border #3A3936, text #FAF9F5 / #B5B2A9, accent clay #D97757. Light: surface #FAF9F5, border #D9D5C7, text #141413 / #5E5B52, accent #C4623F. Local Segoe UI only; no external fonts or images.
 
-Position and pin preference persist locally. Clamp restored position to the current work area. Startup opens the widget without a browser or console. Closing stops its private usage reader.
+Missing or expired allowance shows `--`, never a fabricated reset to 100%, and passed reset times show `reset due` until a new reading. Product shares are also `--` once the weekly window has passed its reset. Keep each reset tooltip and accessible names on the ring, values, buttons and product rows.
+
+Drag anywhere on the strip to move it; right-click it for options (always on top, start with Windows, quit). Keyboard: Tab, F5 refresh, Escape quits. The × button quits and stops the private usage reader. Position and pin preference persist locally and are clamped to the current work area.
