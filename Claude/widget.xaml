@@ -12,7 +12,6 @@
     <SolidColorBrush x:Key="TextSecondary" Color="#B5B2A9"/>
     <SolidColorBrush x:Key="Accent" Color="#D97757"/>
     <SolidColorBrush x:Key="RingTrack" Color="#3A2A24"/>
-    <SolidColorBrush x:Key="BarTrack" Color="#33322F"/>
     <SolidColorBrush x:Key="Divider" Color="#3A3936"/>
     <SolidColorBrush x:Key="ButtonBg" Color="#2C2B29"/>
     <SolidColorBrush x:Key="ButtonHover" Color="#3D3B38"/>
@@ -36,20 +35,8 @@
         </ControlTemplate></Setter.Value>
       </Setter>
     </Style>
-    <Style x:Key="ProductName" TargetType="TextBlock">
-      <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
-      <Setter Property="FontSize" Value="12"/>
-      <Setter Property="VerticalAlignment" Value="Center"/>
-      <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
-    </Style>
-    <Style x:Key="ProductPct" TargetType="TextBlock">
-      <Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/>
-      <Setter Property="FontSize" Value="11"/>
-      <Setter Property="TextAlignment" Value="Right"/>
-      <Setter Property="VerticalAlignment" Value="Center"/>
-    </Style>
   </Window.Resources>
-  <!-- Glance strip: a slim pill that expands downward into this week's usage by product. -->
+  <!-- Glance strip: a slim pill that expands downward into the status line and buttons. -->
   <Border x:Name="Surface" Margin="6" CornerRadius="32" BorderThickness="1" Background="{DynamicResource CardBg}" BorderBrush="{DynamicResource CardBorder}">
     <Border.Effect><DropShadowEffect BlurRadius="10" ShadowDepth="2" Opacity="0.35" Color="#000000"/></Border.Effect>
     <Grid>
@@ -68,54 +55,23 @@
           <StackPanel VerticalAlignment="Center">
             <TextBlock x:Name="PrimaryValue" Text="--" Foreground="{DynamicResource TextPrimary}" FontSize="20" FontWeight="Bold" LineHeight="22" LineStackingStrategy="BlockLineHeight"/>
             <TextBlock x:Name="PrimaryReset" Text="5-hour" Foreground="{DynamicResource TextSecondary}" FontSize="11" Margin="0,1,0,0"/>
+            <TextBlock x:Name="PrimaryTokens" Text="-- used" Foreground="{DynamicResource TextSecondary}" FontSize="11"/>
           </StackPanel>
         </StackPanel>
         <Rectangle Grid.Column="1" Width="1" Height="34" Fill="{DynamicResource Divider}" Margin="12,0,12,0"/>
         <StackPanel Grid.Column="2" VerticalAlignment="Center">
           <TextBlock x:Name="WeeklyValue" Text="--" Foreground="{DynamicResource TextPrimary}" FontSize="20" FontWeight="Bold" LineHeight="22" LineStackingStrategy="BlockLineHeight"/>
           <TextBlock x:Name="WeeklyReset" Text="Weekly" Foreground="{DynamicResource TextSecondary}" FontSize="11" Margin="0,1,0,0"/>
+          <TextBlock x:Name="WeeklyTokens" Text="-- used" Foreground="{DynamicResource TextSecondary}" FontSize="11"/>
         </StackPanel>
-        <Button x:Name="ExpandButton" Grid.Column="3" Content="&#x25BE;" Width="36" Height="36" FontSize="14" ToolTip="Show usage by product" AutomationProperties.Name="Show usage by product"/>
+        <Button x:Name="ExpandButton" Grid.Column="3" Content="&#x25BE;" Width="36" Height="36" FontSize="14" ToolTip="Show status and options" AutomationProperties.Name="Show status and options"/>
       </Grid>
-      <Grid Grid.Row="1" x:Name="BreakdownPanel" Visibility="Collapsed" Height="184" Margin="16,0,16,0">
+      <Grid Grid.Row="1" x:Name="DetailsPanel" Visibility="Collapsed" Height="52" Margin="16,0,16,0">
         <Grid.RowDefinitions>
-          <RowDefinition Height="1"/><RowDefinition Height="30"/><RowDefinition Height="26"/><RowDefinition Height="26"/><RowDefinition Height="26"/><RowDefinition Height="26"/><RowDefinition Height="*"/>
+          <RowDefinition Height="1"/><RowDefinition Height="*"/>
         </Grid.RowDefinitions>
         <Rectangle Fill="{DynamicResource Divider}"/>
-        <TextBlock Grid.Row="1" Text="This week's usage by product" Foreground="{DynamicResource TextPrimary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,4,0,0"/>
-        <Grid Grid.Row="2" x:Name="Brk0Row">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="86"/><ColumnDefinition Width="*"/><ColumnDefinition Width="40"/></Grid.ColumnDefinitions>
-          <TextBlock x:Name="Brk0Name" Style="{StaticResource ProductName}"/>
-          <Border Grid.Column="1" Height="6" CornerRadius="3" Background="{DynamicResource BarTrack}" VerticalAlignment="Center" ClipToBounds="True">
-            <Grid><Grid.ColumnDefinitions><ColumnDefinition x:Name="Brk0Fill" Width="0*"/><ColumnDefinition x:Name="Brk0Rest" Width="1*"/></Grid.ColumnDefinitions><Border Background="{DynamicResource Accent}" CornerRadius="3"/></Grid>
-          </Border>
-          <TextBlock Grid.Column="2" x:Name="Brk0Pct" Style="{StaticResource ProductPct}"/>
-        </Grid>
-        <Grid Grid.Row="3" x:Name="Brk1Row">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="86"/><ColumnDefinition Width="*"/><ColumnDefinition Width="40"/></Grid.ColumnDefinitions>
-          <TextBlock x:Name="Brk1Name" Style="{StaticResource ProductName}"/>
-          <Border Grid.Column="1" Height="6" CornerRadius="3" Background="{DynamicResource BarTrack}" VerticalAlignment="Center" ClipToBounds="True">
-            <Grid><Grid.ColumnDefinitions><ColumnDefinition x:Name="Brk1Fill" Width="0*"/><ColumnDefinition x:Name="Brk1Rest" Width="1*"/></Grid.ColumnDefinitions><Border Background="{DynamicResource Accent}" CornerRadius="3"/></Grid>
-          </Border>
-          <TextBlock Grid.Column="2" x:Name="Brk1Pct" Style="{StaticResource ProductPct}"/>
-        </Grid>
-        <Grid Grid.Row="4" x:Name="Brk2Row">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="86"/><ColumnDefinition Width="*"/><ColumnDefinition Width="40"/></Grid.ColumnDefinitions>
-          <TextBlock x:Name="Brk2Name" Style="{StaticResource ProductName}"/>
-          <Border Grid.Column="1" Height="6" CornerRadius="3" Background="{DynamicResource BarTrack}" VerticalAlignment="Center" ClipToBounds="True">
-            <Grid><Grid.ColumnDefinitions><ColumnDefinition x:Name="Brk2Fill" Width="0*"/><ColumnDefinition x:Name="Brk2Rest" Width="1*"/></Grid.ColumnDefinitions><Border Background="{DynamicResource Accent}" CornerRadius="3"/></Grid>
-          </Border>
-          <TextBlock Grid.Column="2" x:Name="Brk2Pct" Style="{StaticResource ProductPct}"/>
-        </Grid>
-        <Grid Grid.Row="5" x:Name="Brk3Row">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="86"/><ColumnDefinition Width="*"/><ColumnDefinition Width="40"/></Grid.ColumnDefinitions>
-          <TextBlock x:Name="Brk3Name" Style="{StaticResource ProductName}"/>
-          <Border Grid.Column="1" Height="6" CornerRadius="3" Background="{DynamicResource BarTrack}" VerticalAlignment="Center" ClipToBounds="True">
-            <Grid><Grid.ColumnDefinitions><ColumnDefinition x:Name="Brk3Fill" Width="0*"/><ColumnDefinition x:Name="Brk3Rest" Width="1*"/></Grid.ColumnDefinitions><Border Background="{DynamicResource Accent}" CornerRadius="3"/></Grid>
-          </Border>
-          <TextBlock Grid.Column="2" x:Name="Brk3Pct" Style="{StaticResource ProductPct}"/>
-        </Grid>
-        <Grid Grid.Row="6" VerticalAlignment="Center">
+        <Grid Grid.Row="1" VerticalAlignment="Center">
           <TextBlock x:Name="StatusText" Text="Connecting..." Foreground="{DynamicResource TextSecondary}" FontSize="11" MaxWidth="150" HorizontalAlignment="Left" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
           <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
             <Button x:Name="MenuButton" Content="&#x22EF;" ToolTip="Widget options" AutomationProperties.Name="Widget options" Margin="0,0,4,0"/>

@@ -6,7 +6,8 @@ A compact native Windows (WPF) widget showing remaining **Claude** allowance: a 
 - Build the launcher once from this folder with `powershell -NoProfile -ExecutionPolicy Bypass -File .\build-launcher.ps1`. That creates `Claude Widget.exe` beside the project files.
 - Then double-click `Claude Widget.exe` (or `Start Widget.cmd`). Requires Windows PowerShell 5.1 and Node.js 22+.
 - Right-click the strip (or use the `...` button when expanded) for *Always on top*, *Start with Windows*, and *Quit*. F5 refreshes; Escape quits; the × button quits too.
-- The arrow button on the strip expands a collapsed-by-default panel showing this week's usage by product (Claude Code, Chats, Cowork, Other) from the account's weekly breakdown. It shows `--` when the weekly window has passed its reset.
+- The arrow button on the strip expands a collapsed-by-default panel with the status line and the options, refresh and quit buttons.
+- Under the 5-hour value the widget shows tokens used, counted from Claude Code session logs on this PC (new input, output and cache writes; the window is taken to start 5 hours before its reset). Chats, Cowork and other devices are not included. Under the weekly value it shows an estimate of tokens left: 16.7M non-cached tokens (an independent estimate for a Team Standard seat, not an Anthropic figure) times the remaining percentage. Both show `--` once the window has passed its reset.
 - `npm test` runs the usage tests. Rebuild the launcher with `build-launcher.ps1`.
 
 ## Behavior

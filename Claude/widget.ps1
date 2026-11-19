@@ -67,9 +67,9 @@ $script:ringCenter = [Windows.Point]::new(22, 22)
 # The widget follows the Windows app theme (Settings > Personalization > Colors > Choose your mode).
 $script:themes = @{
   dark = @{ CardBg = '#1F1E1D'; CardBorder = '#3A3936'; TextPrimary = '#FAF9F5'; TextSecondary = '#B5B2A9'; Accent = '#D97757'
-    RingTrack = '#3A2A24'; BarTrack = '#33322F'; Divider = '#3A3936'; ButtonBg = '#2C2B29'; ButtonHover = '#3D3B38' }
+    RingTrack = '#3A2A24'; Divider = '#3A3936'; ButtonBg = '#2C2B29'; ButtonHover = '#3D3B38' }
   light = @{ CardBg = '#FAF9F5'; CardBorder = '#D9D5C7'; TextPrimary = '#141413'; TextSecondary = '#5E5B52'; Accent = '#C4623F'
-    RingTrack = '#EBD9D0'; BarTrack = '#E6E2D6'; Divider = '#D9D5C7'; ButtonBg = '#ECE9DF'; ButtonHover = '#DDD9CC' }
+    RingTrack = '#EBD9D0'; Divider = '#D9D5C7'; ButtonBg = '#ECE9DF'; ButtonHover = '#DDD9CC' }
 }
 $script:themeName = $null
 
@@ -136,6 +136,13 @@ function Format-ResetShort($reset) {
   "${minutes}m"
 }
 
+function Format-Tokens($count) {
+  if ($null -eq $count) { return '--' }
+  if ($count -ge 1000000) { return ('{0:0.##}M' -f ($count / 1000000)) }
+  if ($count -ge 1000) { return ('{0:0.#}K' -f ($count / 1000)) }
+  [string][int]$count
+}
+
 function Export-Widget($path) {
   $script:window.UpdateLayout()
   $bitmap = [Windows.Media.Imaging.RenderTargetBitmap]::new([int]$script:window.Width, [int]$script:window.Height, 96, 96, [Windows.Media.PixelFormats]::Pbgra32)
@@ -146,51 +153,24 @@ function Export-Widget($path) {
   try { $encoder.Save($stream) } finally { $stream.Dispose() }
 }
 
-# Collapsed by default; the strip's arrow button reveals the per-product share of this week's usage.
+# Collapsed by default; the strip's arrow button reveals the status line and buttons.
 $script:collapsedHeight = 76
-$script:breakdownExpanded = $false
+$script:detailsExpanded = $false
 
-function Set-Breakdown($expanded) {
-  $script:breakdownExpanded = $expanded
-  $panel = $script:window.FindName('BreakdownPanel')
+function Set-Details($expanded) {
+  $script:detailsExpanded = $expanded
+  $panel = $script:window.FindName('DetailsPanel')
   $button = $script:window.FindName('ExpandButton')
   $panel.Visibility = if ($expanded) { 'Visible' } else { 'Collapsed' }
   $script:window.Height = $script:collapsedHeight + $(if ($expanded) { $panel.Height + $panel.Margin.Top } else { 0 })
   $button.Content = if ($expanded) { [string][char]0x25B4 } else { [string][char]0x25BE }
-  $tip = if ($expanded) { 'Hide usage by product' } else { 'Show usage by product' }
+  $tip = if ($expanded) { 'Hide status and options' } else { 'Show status and options' }
   $button.ToolTip = $tip
   [Windows.Automation.AutomationProperties]::SetName($button, $tip)
   if ($expanded) { Send-Worker 'expand' }
   # Keep the widget fully on screen when it grows downward.
   $area = [Windows.SystemParameters]::WorkArea
   if ($script:window.Top + $script:window.Height -gt $area.Bottom) { $script:window.Top = [Math]::Max($area.Top, $area.Bottom - $script:window.Height) }
-}
-
-function Render-Breakdown {
-  $snapshot = $script:snapshot
-  $weekly = $snapshot.windows[1]
-  # Shares belong to the weekly window, so they are unknown once that window has passed its reset.
-  $known = $snapshot.breakdown -and $weekly -and -not $weekly.expired -and
-    -not ($weekly.resetsAt -and [DateTimeOffset]::Parse($weekly.resetsAt) -le [DateTimeOffset]::UtcNow)
-  $rows = if ($known) { @($snapshot.breakdown) } else { @() }
-  for ($i = 0; $i -lt 4; $i++) {
-    $row = $script:window.FindName("Brk${i}Row")
-    $name = $script:window.FindName("Brk${i}Name"); $pct = $script:window.FindName("Brk${i}Pct")
-    $fill = $script:window.FindName("Brk${i}Fill"); $rest = $script:window.FindName("Brk${i}Rest")
-    $item = if ($i -lt $rows.Count) { $rows[$i] } else { $null }
-    if (-not $item -and $rows.Count -gt 0) { $row.Visibility = 'Collapsed'; continue }
-    $row.Visibility = 'Visible'
-    if ($item) {
-      $value = [Math]::Min(100.0, [Math]::Max(0.0, [double]$item.percent))
-      $name.Text = $item.label; $pct.Text = ('{0:0.#}%' -f $value)
-      $fill.Width = [Windows.GridLength]::new($value, 'Star'); $rest.Width = [Windows.GridLength]::new(100 - $value, 'Star')
-      [Windows.Automation.AutomationProperties]::SetName($row, "$($item.label): $($pct.Text) of this week's usage")
-    } else {
-      $name.Text = @('Claude Code', 'Chats', 'Cowork', 'Other')[$i]; $pct.Text = '--'
-      $fill.Width = [Windows.GridLength]::new(0, 'Star'); $rest.Width = [Windows.GridLength]::new(1, 'Star')
-      [Windows.Automation.AutomationProperties]::SetName($row, "$($name.Text): unknown")
-    }
-  }
 }
 
 function Render-Usage {
@@ -219,12 +199,25 @@ function Render-Usage {
     $label.Opacity = $opacity
     $caption = if ($prefix -eq 'Primary') { '5-hour' } else { 'Weekly' }
     $reset.Text = "$caption " + [char]0x00B7 + ' ' + $(if ($limit) { Format-ResetShort $limit.resetsAt } else { '--' })
+    $tokens = $script:window.FindName($prefix + 'Tokens')
+    $used = if ($limit -and -not $isExpired) { $limit.tokensUsed } else { $null }
+    $left = if ($limit -and -not $isExpired) { $limit.tokensLeft } else { $null }
+    if ($null -ne $left) {
+      $tokens.Text = [char]0x2248 + (Format-Tokens $left) + ' left'
+      $tokens.ToolTip = ('About {0:N0} tokens left this week: an independent estimate of the Team Standard weekly allowance (16.7M non-cached tokens) times the remaining percentage. Anthropic does not publish the real limit.' -f $left)
+    } else {
+      $tokens.Text = (Format-Tokens $used) + ' used'
+      $tokens.ToolTip = if ($null -eq $used) { 'Token count unknown for this window.' } else {
+        ('{0:N0}' -f $used) + ' tokens used in this window, counted from Claude Code sessions on this PC (new input, output and cache writes). Chats, Cowork and other devices are not included.' }
+    }
+    $tokens.Opacity = $opacity
+    [Windows.Automation.AutomationProperties]::SetName($tokens, "$prefix tokens: $($tokens.ToolTip)")
     $reset.ToolTip = if ($limit -and $limit.resetsAt) { [DateTimeOffset]::Parse($limit.resetsAt).ToLocalTime().ToString('f') } else { 'No reset reported' }
   }
-  Render-Breakdown
   $age = if ($snapshot.observedAt) { ([DateTimeOffset]::UtcNow - [DateTimeOffset]::Parse($snapshot.observedAt)).TotalSeconds } else { [double]::PositiveInfinity }
   $live = $snapshot.source -eq 'live' -and $age -le 300 -and -not $script:disconnected
   $status = if ($script:disconnected) { 'Disconnected - retrying' }
+    elseif ($snapshot.errorCode -in 'login_missing', 'login_expired') { 'Sign in to Claude Code' }
     elseif ($snapshot.source -eq 'unavailable') { 'Unavailable - sign in to Claude Code' }
     elseif ($snapshot.retryAt -and [DateTimeOffset]::Parse($snapshot.retryAt) -gt [DateTimeOffset]::UtcNow) {
       'Rate limited - retry ' + [DateTimeOffset]::Parse($snapshot.retryAt).ToLocalTime().ToString('h:mm tt') }
@@ -293,19 +286,14 @@ try {
       source = $(if ($PreviewState -eq 'stale') { 'local' } elseif ($PreviewState -eq 'unknown') { 'unavailable' } else { 'live' })
       observedAt = $now.AddMinutes(-$(if ($PreviewState -eq 'stale') { 180 } else { 0 })).ToString('o')
       windows = @(
-        [pscustomobject]@{remainingPercent = $v1; resetsAt = $now.AddMinutes(177).ToString('o'); expired = ($PreviewState -eq 'expired')},
-        [pscustomobject]@{remainingPercent = $v2; resetsAt = $now.AddDays(4).AddHours(2).ToString('o'); expired = $false})
+        [pscustomobject]@{remainingPercent = $v1; resetsAt = $now.AddMinutes(177).ToString('o'); expired = ($PreviewState -eq 'expired'); tokensUsed = $(if ($PreviewState -eq 'zero') { 0 } else { 1240000 })},
+        [pscustomobject]@{remainingPercent = $v2; resetsAt = $now.AddDays(4).AddHours(2).ToString('o'); expired = $false; tokensUsed = 0; tokensLeft = [int](16700000 * $v2 / 100)})
     }
-    $script:snapshot | Add-Member breakdown @(
-      [pscustomobject]@{label = 'Claude Code'; percent = $(if ($PreviewState -eq 'zero') { 0 } else { 79 })},
-      [pscustomobject]@{label = 'Chats'; percent = 0},
-      [pscustomobject]@{label = 'Cowork'; percent = $(if ($PreviewState -eq 'zero') { 0 } else { 21 })},
-      [pscustomobject]@{label = 'Other'; percent = 0})
     if ($PreviewState -eq 'unknown') { $script:snapshot.windows = @($null, $null); $script:snapshot.observedAt = $null }
     if ($PreviewState -eq 'expired') { $script:snapshot.windows[0].resetsAt = $now.AddSeconds(-1).ToString('o') }
     Set-Theme $(if ($PreviewTheme -eq 'system') { Get-SystemTheme } else { $PreviewTheme })
     Render-Usage
-    Set-Breakdown ([bool]$PreviewExpanded)
+    Set-Details ([bool]$PreviewExpanded)
     $script:window.ShowActivated = $false
     $script:window.Show()
     Export-Widget $PreviewPath
@@ -341,7 +329,7 @@ try {
   $script:window.FindName('DragHandle').Add_MouseLeftButtonDown({
     if ($_.ButtonState -eq 'Pressed') { $script:window.DragMove(); Save-Settings }
   })
-  $script:window.FindName('ExpandButton').Add_Click({ Set-Breakdown (-not $script:breakdownExpanded) })
+  $script:window.FindName('ExpandButton').Add_Click({ Set-Details (-not $script:detailsExpanded) })
   $script:window.FindName('RefreshButton').Add_Click({
     try {
       if (-not $script:worker -or $script:worker.HasExited) { Start-Worker }

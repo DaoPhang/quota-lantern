@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { normalizeUsage, normalizeWindow, loadLastKnown, createUsageReader } from '../usage.mjs';
+import { normalizeUsage, normalizeWindow, loadLastKnown, createUsageReader, WEEKLY_TOKEN_ESTIMATE } from '../usage.mjs';
+import { createTokenCounter } from '../tokens.mjs';
 
 const now = Date.parse('2026-11-03T05:00:00Z');
 const future = new Date(now + 3600000).toISOString();
@@ -90,15 +91,57 @@ test('expired access token is renewed and written back without losing other keys
   } finally { globalThis.fetch = realFetch; await rm(dir, { recursive: true, force: true }); }
 });
 
-test('weekly product breakdown keeps labels and clamped percentages only', () => {
-  const rows = [
-    { key: 'claude_code', display_name: 'Claude Code', percent: 80 },
-    { key: 'chat', display_name: 'Chats', percent: -5 },
-    { key: 'bad', display_name: 'Bad', percent: 'x' },
-  ];
-  const usage = normalizeUsage({ seven_day_breakdown: { rows } });
-  assert.deepEqual(usage.breakdown, [{ label: 'Claude Code', percent: 80 }, { label: 'Chats', percent: 0 }]);
-  assert.equal(normalizeUsage({}).breakdown, null);
+test('windows start one window-length before reset and are unknown once passed', () => {
+  const primary = normalizeWindow({ utilization: 10, resets_at: future }, 'primary', now);
+  assert.equal(primary.startsAt, new Date(now + 3600000 - 300 * 60000).toISOString());
+  const weekly = normalizeWindow({ utilization: 10, resets_at: future }, 'secondary', now);
+  assert.equal(weekly.startsAt, new Date(now + 3600000 - 10080 * 60000).toISOString());
+  assert.equal(normalizeWindow({ utilization: 10, resets_at: new Date(now - 1000).toISOString() }, 'primary', now).startsAt, null);
+  assert.equal(normalizeWindow({ utilization: 10, resets_at: null }, 'primary', now).startsAt, null);
+  assert.equal(weekly.tokensLeft, Math.round(WEEKLY_TOKEN_ESTIMATE * 0.9));
+  assert.equal(primary.tokensLeft, null);
+  assert.equal(normalizeWindow({ utilization: 10, resets_at: new Date(now - 1000).toISOString() }, 'secondary', now).tokensLeft, null);
+  assert.equal(normalizeUsage({}).breakdown, undefined);
+});
+
+test('token counter sums new input, output and cache writes per window and counts each message once', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'claude-tokens-'));
+  try {
+    const line = (id, at, usage, extra = {}) => JSON.stringify({ type: 'assistant', uuid: `u-${id}-${at}`, timestamp: new Date(at).toISOString(),
+      message: { id, model: 'm', usage, content: [{ type: 'text', text: 'private' }] }, ...extra });
+    const hour = 3600000;
+    await mkdir(join(dir, 'projects', 'a', 'sub'), { recursive: true });
+    await writeFile(join(dir, 'projects', 'a', 's1.jsonl'), [
+      line('m1', now - hour, { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 100, cache_read_input_tokens: 9999 }),
+      line('m1', now - hour, { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 100 }), // streamed repeat: larger reading wins
+      line('m2', now - 6 * hour, { input_tokens: 1, output_tokens: 1 }),                                  // outside the 5-hour window
+      JSON.stringify({ type: 'user', timestamp: new Date(now - hour).toISOString(), message: { usage: { input_tokens: 7777 } } }),
+      'not json "usage" "assistant"',
+    ].join('\n'));
+    // A resumed session repeats m1 in another file and adds a subagent message.
+    await writeFile(join(dir, 'projects', 'a', 'sub', 's2.jsonl'), [
+      line('m1', now - hour, { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 100 }),
+      line('m3', now - 2 * hour, { input_tokens: 4, output_tokens: 6 }),
+    ].join('\n'));
+    const count = createTokenCounter();
+    assert.deepEqual(await count(dir, [now - 5 * hour, now - 7 * 24 * hour, null], now), [140, 142, null]);
+    assert.deepEqual(await count(join(dir, 'missing'), [now - hour], now), [0]);
+    assert.deepEqual(await count(dir, [null, null], now), [null, null]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('live reading carries tokens used in each window and stays valid when no logs exist', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'claude-usage-'));
+  const realFetch = globalThis.fetch;
+  try {
+    await writeFile(join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'x', expiresAt: Date.now() + 1e9 } }));
+    const soon = new Date(Date.now() + 3600000).toISOString();
+    globalThis.fetch = async () => new Response(JSON.stringify({ five_hour: { utilization: 20, resets_at: soon }, seven_day: { utilization: 5, resets_at: soon } }), { status: 200 });
+    const usage = await createUsageReader(dir, join(dir, 'cache.json'))(0);
+    assert.equal(usage.windows[0].tokensUsed, 0);
+    assert.equal(usage.windows[1].tokensUsed, 0);
+    assert.equal(usage.windows[0].remainingPercent, 80);
+  } finally { globalThis.fetch = realFetch; await rm(dir, { recursive: true, force: true }); }
 });
 
 test('rate limiting keeps the last reading, honors Retry-After and does not refetch during backoff', async () => {

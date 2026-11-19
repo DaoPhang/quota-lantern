@@ -1,9 +1,13 @@
-import { readFile, writeFile, rename, unlink } from 'node:fs/promises';
+import { readFile, writeFile, rename, unlink, readdir, stat } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { createTokenCounter } from './tokens.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+// Independent estimate of non-cached tokens in one Team Standard weekly allowance. Anthropic does not publish it.
+export const WEEKLY_TOKEN_ESTIMATE = 16700000;
 
 // Anthropic reports utilization as 0-100 and resets_at as an ISO timestamp.
 export function normalizeWindow(raw, kind, now = Date.now()) {
@@ -12,29 +16,24 @@ export function normalizeWindow(raw, kind, now = Date.now()) {
   const resetsAt = Number.isFinite(resetDate.getTime()) ? resetDate.toISOString() : null;
   const expired = resetsAt !== null && Date.parse(resetsAt) <= now;
   const used = Math.min(100, Math.max(0, raw.utilization));
+  const windowMinutes = kind === 'primary' ? 300 : 10080;
   return {
     kind, label: kind === 'primary' ? 'Short-term window' : 'Weekly window',
-    windowMinutes: kind === 'primary' ? 300 : 10080,
+    windowMinutes,
+    // The window is taken to begin one window-length before its reset; unknown once the reset has passed.
+    startsAt: resetsAt && !expired ? new Date(Date.parse(resetsAt) - windowMinutes * 60000).toISOString() : null,
+    tokensUsed: null,
+    tokensLeft: kind === 'primary' || expired ? null : Math.round(WEEKLY_TOKEN_ESTIMATE * (100 - used) / 100),
     usedPercent: expired ? null : used,
     remainingPercent: expired ? null : Math.round((100 - used) * 10) / 10,
     resetsAt, expired,
   };
 }
 
-// Share of this week's usage per product. Only labels and percentages are kept.
-export function normalizeBreakdown(raw) {
-  if (!Array.isArray(raw?.rows)) return null;
-  const rows = raw.rows
-    .filter(row => row && typeof row.display_name === 'string' && typeof row.percent === 'number' && Number.isFinite(row.percent))
-    .map(row => ({ label: row.display_name.slice(0, 24), percent: Math.min(100, Math.max(0, row.percent)) }));
-  return rows.length ? rows.slice(0, 4) : null;
-}
-
 export function normalizeUsage(raw, source = 'live', observedAt = new Date().toISOString(), now = Date.now(), plan = null) {
   return {
     source, observedAt, plan,
     windows: [normalizeWindow(raw.five_hour, 'primary', now), normalizeWindow(raw.seven_day, 'secondary', now)],
-    breakdown: normalizeBreakdown(raw.seven_day_breakdown),
   };
 }
 
@@ -89,7 +88,40 @@ async function readAuth(home) {
   return auth;
 }
 
-async function liveUsage(home) {
+// Candidate Claude homes, best first: the explicit/env home, ~/.claude, then Orca-managed profiles
+// (newest credentials first). Only homes that hold an access token are tried.
+async function candidateHomes(home, discover) {
+  const homes = [home];
+  if (!discover) return homes;
+  const add = (dir) => { if (!homes.includes(dir)) homes.push(dir); };
+  add(join(homedir(), '.claude'));
+  const root = join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'orca', 'claude-profiles');
+  try {
+    const found = [];
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const dir = join(root, entry.name, 'home');
+      try { found.push({ dir, mtime: (await stat(join(dir, '.credentials.json'))).mtimeMs }); } catch {}
+    }
+    found.sort((a, b) => b.mtime - a.mtime).forEach(({ dir }) => add(dir));
+  } catch {}
+  return homes;
+}
+
+async function liveUsage(home, discover = false) {
+  let failure = new Error('login_missing');
+  for (const candidate of await candidateHomes(home, discover)) {
+    try { return await liveUsageFrom(candidate); }
+    catch (error) {
+      // Only try the next home when this one has no usable login; real service errors stop here.
+      if (error.message !== 'login_missing' && error.message !== 'login_expired') throw error;
+      if (failure.message === 'login_missing') failure = error;
+    }
+  }
+  throw failure;
+}
+
+async function liveUsageFrom(home) {
   const auth = await readAuth(home);
   const response = await fetch('https://api.anthropic.com/api/oauth/usage', {
     headers: {
@@ -106,10 +138,10 @@ async function liveUsage(home) {
   if (!response.ok) throw new Error(response.status === 401 || response.status === 403 ? 'login_expired' : 'service_unavailable');
   const raw = await response.json();
   if (!raw.five_hour && !raw.seven_day) throw new Error('limits_missing');
-  return { raw, usage: normalizeUsage(raw, 'live', new Date().toISOString(), Date.now(), auth.subscriptionType ?? null) };
+  return { raw, home, usage: normalizeUsage(raw, 'live', new Date().toISOString(), Date.now(), auth.subscriptionType ?? null) };
 }
 
-// Only percentages and reset times are stored: no tokens, prompts or paths.
+// Only percentages and reset times are stored: no credentials, prompts or paths.
 export async function loadLastKnown(file) {
   try {
     const saved = JSON.parse(await readFile(file, 'utf8'));
@@ -126,11 +158,15 @@ const explanations = {
   service_unavailable: 'The live usage service is unavailable. Try refreshing shortly.',
 };
 
-export function createUsageReader(home = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'),
-  cacheFile = join(here, 'usage-cache.json')) {
+export function createUsageReader(home, cacheFile = join(here, 'usage-cache.json')) {
+  // An explicit home (tests) is used alone; otherwise the login is discovered automatically.
+  const discover = home === undefined;
+  home ??= process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
   let cached;
   let pending;
   let blockedUntil;
+  let tokenHome = home;
+  const countTokens = createTokenCounter();
   // A rate-limit backoff survives restarts, so reopening the widget does not retry too early.
   const loadBlock = async () => {
     try { return Number(JSON.parse(await readFile(cacheFile, 'utf8')).blockedUntil) || 0; } catch { return 0; }
@@ -148,18 +184,25 @@ export function createUsageReader(home = process.env.CLAUDE_CONFIG_DIR || join(h
       blockedUntil ??= await loadBlock();
       try {
         if (Date.now() < blockedUntil) throw new Error('rate_limited');
-        const { raw, usage } = await liveUsage(home);
+        const { raw, usage, home: usedHome } = await liveUsage(home, discover);
         result = usage;
+        tokenHome = usedHome;
         blockedUntil = 0;
-        const { five_hour, seven_day, seven_day_breakdown } = raw;
-        await writeFile(cacheFile, JSON.stringify({ observedAt: usage.observedAt, plan: usage.plan, raw: { five_hour, seven_day, seven_day_breakdown } }))
+        const { five_hour, seven_day } = raw;
+        await writeFile(cacheFile, JSON.stringify({ observedAt: usage.observedAt, plan: usage.plan, raw: { five_hour, seven_day } }))
           .catch(() => {});
       } catch (error) {
         if (error.retryAfterMs) { blockedUntil = Date.now() + error.retryAfterMs; await saveBlock(blockedUntil); }
         const fallback = await loadLastKnown(cacheFile);
-        result = fallback ?? { source: 'unavailable', observedAt: null, plan: null, windows: [null, null], breakdown: null };
-        result.notice = explanations[error.message] ?? 'Could not reach the live usage service. Check your connection and refresh.';
+        result = fallback ?? { source: 'unavailable', observedAt: null, plan: null, windows: [null, null] };
+        result.errorCode = error.message in explanations ? error.message : 'unknown';
+        result.notice = explanations[error.message] ??'Could not reach the live usage service. Check your connection and refresh.';
       }
+      // Tokens Claude Code logged on this PC inside each window; never fails the reading.
+      try {
+        const totals = await countTokens(tokenHome, result.windows.map(w => (w?.startsAt ? Date.parse(w.startsAt) : null)));
+        result.windows.forEach((w, i) => { if (w) w.tokensUsed = totals[i]; });
+      } catch {}
       result.checkedAt = new Date().toISOString();
       result.retryAt = Date.now() < blockedUntil ? new Date(blockedUntil).toISOString() : null;
       result.stale = !result.observedAt || Date.now() - Date.parse(result.observedAt) > 300000;
