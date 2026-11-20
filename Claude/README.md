@@ -18,3 +18,10 @@ A compact native Windows (WPF) widget showing remaining **Claude** allowance: a 
 
 - The widget is a slim strip that follows the Windows light/dark app theme automatically.
 - Updates are paced to respect the usage service's rate limit: every 2 minutes while you are active, every 10 minutes after 5 minutes idle, immediately when you return, and on demand when you expand the panel or press refresh. A rate-limit response is honored (see the footer) and recovers automatically.
+
+## Insights
+- **Model weekly row**: when the usage service reports a separate weekly cap for one model, the expanded panel adds a "<model> weekly" row (percent left and time to reset). It disappears when the service stops reporting one. Tokens are not counted for it.
+- **Pace**: the expanded panel estimates time to limit from this widget's own recent live readings (the last 15 minutes). It shows in amber only when the limit would arrive before the reset, and is hidden until two live readings exist or while data is stale. It is an estimate, not an Anthropic figure.
+- **Notifications**: a Windows balloon appears when the 5-hour or weekly window passes 75% or 90% used, once per threshold per window. The first reading after launch is only a baseline, and a restart does not repeat a threshold. Toggle from the options menu (`widget-settings.json` keeps the choice; `alerts-state.json` keeps notified thresholds as percentages and reset times only).
+- **Peak hours**: on weekdays 5-11 AM Pacific the expanded panel shows a hint that limits are reported reduced. This is a time-based hint from public reports, not a live reading.
+- Preview these with `widget.ps1 -PreviewPath out.png -PreviewState insights -PreviewExpanded`.

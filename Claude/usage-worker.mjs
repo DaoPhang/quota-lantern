@@ -1,5 +1,9 @@
 import { createInterface } from 'node:readline';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createUsageReader } from './usage.mjs';
+import { createBurnTracker, createCrossingDetector, recordReading, paceFor, crossingAlerts, peakStatus } from './insights.mjs';
 
 // Private pipe to the native widget. No HTTP server or browser is involved.
 // The usage service rate limits clients, so reads are paced: every 2 minutes while the user is
@@ -7,6 +11,29 @@ import { createUsageReader } from './usage.mjs';
 const ACTIVE_MS = 2 * 60 * 1000;
 const IDLE_MS = 10 * 60 * 1000;
 const readUsage = createUsageReader();
+const stateFile = join(dirname(fileURLToPath(import.meta.url)), 'alerts-state.json');
+const tracker = createBurnTracker();
+// Notified thresholds are remembered (percent and reset time only) so a restart does not repeat them.
+let detector;
+let lastObserved;
+
+async function addInsights(usage) {
+  const now = Date.now();
+  if (usage.observedAt !== lastObserved) {
+    lastObserved = usage.observedAt;
+    recordReading(tracker, usage, now);
+    if (!detector) {
+      let saved = {};
+      try { saved = JSON.parse(await readFile(stateFile, 'utf8')); } catch {}
+      detector = createCrossingDetector(undefined, saved);
+    }
+    usage.alerts = crossingAlerts(detector, usage, now);
+    if (usage.alerts.length) await writeFile(stateFile, JSON.stringify(detector.snapshot())).catch(() => {});
+  } else usage.alerts = [];
+  usage.insights = { pace: paceFor(tracker, usage.windows, now), peak: peakStatus(now) };
+  return usage;
+}
+
 let updating = false;
 let idle = false;
 let timer;
@@ -15,7 +42,7 @@ async function update(maxAgeMs) {
   if (updating) return;
   updating = true;
   try {
-    process.stdout.write(`${JSON.stringify(await readUsage(maxAgeMs))}\n`);
+    process.stdout.write(`${JSON.stringify(await addInsights(await readUsage(maxAgeMs)))}\n`);
   } catch {
     process.stdout.write(`${JSON.stringify({ source: 'unavailable', observedAt: null,
       windows: [null, null], notice: 'Unable to read usage. Refresh to try again.' })}\n`);

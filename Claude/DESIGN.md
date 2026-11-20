@@ -11,3 +11,5 @@ Theme follows Windows (Settings > Personalization > Colors > app mode) and updat
 Missing or expired allowance shows `--`, never a fabricated reset to 100%, and passed reset times show `reset due` until a new reading. Product shares are also `--` once the weekly window has passed its reset. Keep each reset tooltip and accessible names on the ring, values, buttons and product rows.
 
 Drag anywhere on the strip to move it; right-click it for options (always on top, start with Windows, quit). Keyboard: Tab, F5 refresh, Escape quits. The × button quits and stops the private usage reader. Position and pin preference persist locally and are clamped to the current work area.
+
+Insight rows (expanded panel only, 18 px each, collapsed until they have a known value): "<model> weekly" remaining and reset, a 5-hour and a weekly pace line, and a peak-hours hint. Pace turns amber only when the limit would arrive before the reset; a model row turns amber at 10% left or less. Pace is hidden while data is stale or unknown. Every row keeps an accessible name and a tooltip saying it is an estimate or hint. The collapsed strip is unchanged.

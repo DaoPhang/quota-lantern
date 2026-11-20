@@ -10,31 +10,51 @@ const here = dirname(fileURLToPath(import.meta.url));
 export const WEEKLY_TOKEN_ESTIMATE = 16700000;
 
 // Anthropic reports utilization as 0-100 and resets_at as an ISO timestamp.
-export function normalizeWindow(raw, kind, now = Date.now()) {
+export function normalizeWindow(raw, kind, now = Date.now(), label = null) {
   if (!raw || typeof raw.utilization !== 'number' || !Number.isFinite(raw.utilization)) return null;
   const resetDate = new Date(raw.resets_at ?? NaN);
   const resetsAt = Number.isFinite(resetDate.getTime()) ? resetDate.toISOString() : null;
   const expired = resetsAt !== null && Date.parse(resetsAt) <= now;
   const used = Math.min(100, Math.max(0, raw.utilization));
   const windowMinutes = kind === 'primary' ? 300 : 10080;
+  const scoped = kind === 'scoped';
   return {
-    kind, label: kind === 'primary' ? 'Short-term window' : 'Weekly window',
+    kind, label: scoped ? label : kind === 'primary' ? 'Short-term window' : 'Weekly window',
     windowMinutes,
     // The window is taken to begin one window-length before its reset; unknown once the reset has passed.
     startsAt: resetsAt && !expired ? new Date(Date.parse(resetsAt) - windowMinutes * 60000).toISOString() : null,
     tokensUsed: null,
-    tokensLeft: kind === 'primary' || expired ? null : Math.round(WEEKLY_TOKEN_ESTIMATE * (100 - used) / 100),
+    tokensLeft: kind !== 'secondary' || expired ? null : Math.round(WEEKLY_TOKEN_ESTIMATE * (100 - used) / 100),
     usedPercent: expired ? null : used,
     remainingPercent: expired ? null : Math.round((100 - used) * 10) / 10,
     resetsAt, expired,
   };
 }
 
+// A model-scoped weekly cap (for example a separate weekly limit for one model) arrives in `limits`
+// as a `weekly_scoped` entry. The one closest to its cap is shown; absent entries give null.
+export function pickScopedLimit(limits) {
+  if (!Array.isArray(limits)) return null;
+  let best = null;
+  for (const entry of limits) {
+    if (entry?.kind !== 'weekly_scoped' || typeof entry.percent !== 'number' || !Number.isFinite(entry.percent)) continue;
+    const name = String(entry.scope?.model?.display_name ?? '').trim();
+    if (name && (!best || entry.percent > best.percent)) best = { name, percent: entry.percent, resets_at: entry.resets_at ?? null };
+  }
+  return best;
+}
+
+export function normalizeScoped(limits, now = Date.now()) {
+  const best = pickScopedLimit(limits);
+  return best ? normalizeWindow({ utilization: best.percent, resets_at: best.resets_at }, 'scoped', now, best.name) : null;
+}
+
 export function normalizeUsage(raw, source = 'live', observedAt = new Date().toISOString(), now = Date.now(), plan = null) {
-  return {
-    source, observedAt, plan,
-    windows: [normalizeWindow(raw.five_hour, 'primary', now), normalizeWindow(raw.seven_day, 'secondary', now)],
-  };
+  const windows = [normalizeWindow(raw.five_hour, 'primary', now), normalizeWindow(raw.seven_day, 'secondary', now)];
+  // The scoped window is appended only when present, so windows[0] and windows[1] keep their positions.
+  const scoped = normalizeScoped(raw.limits, now);
+  if (scoped) windows.push(scoped);
+  return { source, observedAt, plan, windows };
 }
 
 const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
@@ -189,7 +209,9 @@ export function createUsageReader(home, cacheFile = join(here, 'usage-cache.json
         tokenHome = usedHome;
         blockedUntil = 0;
         const { five_hour, seven_day } = raw;
-        await writeFile(cacheFile, JSON.stringify({ observedAt: usage.observedAt, plan: usage.plan, raw: { five_hour, seven_day } }))
+        // Only the scoped weekly entry is kept from limits: its name, percent and reset time.
+        const scoped = pickScopedLimit(raw.limits);
+        await writeFile(cacheFile, JSON.stringify({ observedAt: usage.observedAt, plan: usage.plan, raw: { five_hour, seven_day, limits: scoped ? [{ kind: 'weekly_scoped', percent: scoped.percent, resets_at: scoped.resets_at, scope: { model: { display_name: scoped.name } } }] : [] } }))
           .catch(() => {});
       } catch (error) {
         if (error.retryAfterMs) { blockedUntil = Date.now() + error.retryAfterMs; await saveBlock(blockedUntil); }
@@ -200,8 +222,8 @@ export function createUsageReader(home, cacheFile = join(here, 'usage-cache.json
       }
       // Tokens Claude Code logged on this PC inside each window; never fails the reading.
       try {
-        const totals = await countTokens(tokenHome, result.windows.map(w => (w?.startsAt ? Date.parse(w.startsAt) : null)));
-        result.windows.forEach((w, i) => { if (w) w.tokensUsed = totals[i]; });
+        const totals = await countTokens(tokenHome, result.windows.slice(0, 2).map(w => (w?.startsAt ? Date.parse(w.startsAt) : null)));
+        result.windows.slice(0, 2).forEach((w, i) => { if (w) w.tokensUsed = totals[i]; });
       } catch {}
       result.checkedAt = new Date().toISOString();
       result.retryAt = Date.now() < blockedUntil ? new Date(blockedUntil).toISOString() : null;

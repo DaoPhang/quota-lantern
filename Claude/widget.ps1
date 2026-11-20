@@ -1,7 +1,7 @@
 param(
   [string]$PreviewPath,
   [string]$VerifyPath,
-  [ValidateSet('live', 'stale', 'unknown', 'expired', 'zero', 'full')][string]$PreviewState = 'live',
+  [ValidateSet('live', 'stale', 'unknown', 'expired', 'zero', 'full', 'insights')][string]$PreviewState = 'live',
   [switch]$PreviewExpanded,
   [ValidateSet('system', 'light', 'dark')][string]$PreviewTheme = 'system'
 )
@@ -54,9 +54,14 @@ if (-not $PreviewPath) {
 # Quitting closes the only window, which ends the worker process and releases the single-instance mutex.
 function Quit-Widget { $script:window.Close() }
 
+# Balloon alerts when the 5-hour or weekly allowance crosses a threshold. On by default; toggled from the menu.
+$script:notify = $true
+$script:notifyIcon = $null
+$script:notifyHideAt = [DateTime]::MaxValue
+
 function Save-Settings {
   try {
-    @{ left = $script:window.Left; top = $script:window.Top; topmost = $script:window.Topmost } |
+    @{ left = $script:window.Left; top = $script:window.Top; topmost = $script:window.Topmost; notifications = $script:notify } |
       ConvertTo-Json | Set-Content -LiteralPath $script:settingsPath -Encoding UTF8
   } catch { } # Read-only folders must not prevent the widget from closing.
 }
@@ -162,15 +167,75 @@ function Set-Details($expanded) {
   $panel = $script:window.FindName('DetailsPanel')
   $button = $script:window.FindName('ExpandButton')
   $panel.Visibility = if ($expanded) { 'Visible' } else { 'Collapsed' }
-  $script:window.Height = $script:collapsedHeight + $(if ($expanded) { $panel.Height + $panel.Margin.Top } else { 0 })
+  Update-PanelHeight
   $button.Content = if ($expanded) { [string][char]0x25B4 } else { [string][char]0x25BE }
   $tip = if ($expanded) { 'Hide status and options' } else { 'Show status and options' }
   $button.ToolTip = $tip
   [Windows.Automation.AutomationProperties]::SetName($button, $tip)
   if ($expanded) { Send-Worker 'expand' }
+}
+
+# The expanded panel is 52 px plus 18 px for each insight row that currently has a value.
+function Update-PanelHeight {
+  $panel = $script:window.FindName('DetailsPanel')
+  $rows = @('ScopedText', 'PacePrimaryText', 'PaceWeeklyText', 'PeakText') | Where-Object { $script:window.FindName($_).Visibility -eq 'Visible' }
+  $panel.Height = 52 + 18 * @($rows).Count + $(if (@($rows).Count) { 4 } else { 0 })
+  $script:window.Height = $script:collapsedHeight + $(if ($script:detailsExpanded) { $panel.Height + $panel.Margin.Top } else { 0 })
   # Keep the widget fully on screen when it grows downward.
   $area = [Windows.SystemParameters]::WorkArea
   if ($script:window.Top + $script:window.Height -gt $area.Bottom) { $script:window.Top = [Math]::Max($area.Top, $area.Bottom - $script:window.Height) }
+}
+
+function Format-Minutes($minutes) {
+  if ($minutes -ge 1440) { return ('{0}d {1}h' -f [Math]::Floor($minutes / 1440), [Math]::Floor(($minutes % 1440) / 60)) }
+  if ($minutes -ge 60) { return ('{0}h {1}m' -f [Math]::Floor($minutes / 60), ($minutes % 60)) }
+  "$([Math]::Max(1, [int]$minutes))m"
+}
+
+function Set-InsightRow($name, $text, $tip, $warn) {
+  $row = $script:window.FindName($name)
+  if (-not $text) { $row.Visibility = 'Collapsed'; return }
+  $row.Text = $text
+  $row.ToolTip = $tip
+  $row.Foreground = if ($warn) { [Windows.Media.Brushes]::Orange } else { $script:window.Resources['TextSecondary'] }
+  $row.Visibility = 'Visible'
+  [Windows.Automation.AutomationProperties]::SetName($row, $text)
+}
+
+# One pace line per window: time to limit when the limit would arrive before the reset (amber), else steady.
+function Get-PaceText($caption, $pace, $limit) {
+  if (-not $pace -or -not $limit -or $limit.expired -or $null -eq $limit.remainingPercent) { return $null }
+  if ($null -ne $pace.minutesToLimit -and $pace.beforeReset -ne $false) { return @("$caption pace: ~$(Format-Minutes $pace.minutesToLimit) to limit", $true) }
+  if ($pace.burnPctPerHour -le 0) { return @("$caption pace: steady", $false) }
+  @("$caption pace: on track to last until reset", $false)
+}
+
+function Render-Insights {
+  $snapshot = $script:snapshot
+  $live = $snapshot.source -eq 'live' -and -not $script:disconnected
+  $note = 'Estimated from this widget''s recent readings; not an Anthropic figure.'
+  # Model-scoped weekly window, shown only while the service reports one.
+  $scoped = if (@($snapshot.windows).Count -gt 2) { $snapshot.windows[2] } else { $null }
+  if ($scoped -and $scoped.label -and -not $scoped.expired -and $null -ne $scoped.remainingPercent) {
+    $scopedText = '{0} weekly {1} {2:0.#}% left {1} {3}' -f $scoped.label, [char]0x00B7, $scoped.remainingPercent, (Format-ResetShort $scoped.resetsAt)
+    $scopedTip = 'Weekly allowance for ' + $scoped.label + '. Resets ' + [DateTimeOffset]::Parse($scoped.resetsAt).ToLocalTime().ToString('f')
+    Set-InsightRow 'ScopedText' $scopedText $scopedTip ($scoped.remainingPercent -le 10)
+  } else { Set-InsightRow 'ScopedText' $null $null $false }
+  $pace = if ($live -and $snapshot.insights) { @($snapshot.insights.pace) } else { @() }
+  foreach ($entry in @(@('PacePrimaryText', '5-hour', 0), @('PaceWeeklyText', 'Weekly', 1))) {
+    $result = if ($pace.Count -gt $entry[2]) { Get-PaceText $entry[1] $pace[$entry[2]] $snapshot.windows[$entry[2]] } else { $null }
+    if ($result) { Set-InsightRow $entry[0] $result[0] $note $result[1] } else { Set-InsightRow $entry[0] $null $null $false }
+  }
+  # Peak hours: counted down from the time the reading was taken.
+  $peak = if ($snapshot.insights) { $snapshot.insights.peak } else { $null }
+  $left = $null
+  if ($peak -and $peak.inPeak -and $snapshot.checkedAt) {
+    $left = $peak.minutesUntilEnd - ([DateTimeOffset]::UtcNow - [DateTimeOffset]::Parse($snapshot.checkedAt)).TotalMinutes
+  }
+  if ($left -and $left -gt 0) {
+    Set-InsightRow 'PeakText' ('Peak hours: limits reported reduced, ends in ' + (Format-Minutes ([int][Math]::Ceiling($left)))) 'Anthropic is reported to reduce 5-hour limits on weekday mornings (about 5-11 AM Pacific). This is a time-based hint, not a live reading.' $false
+  } else { Set-InsightRow 'PeakText' $null $null $false }
+  Update-PanelHeight
 }
 
 function Render-Usage {
@@ -234,6 +299,29 @@ function Render-Usage {
   $script:window.FindName('Surface').ToolTip = (@($snapshot.notice, $(if ($snapshot.observedAt) {
     'Reported ' + [DateTimeOffset]::Parse($snapshot.observedAt).ToLocalTime().ToString('f')
   })) | Where-Object { $_ }) -join "`n"
+  Render-Insights
+}
+
+# Shows one balloon through a short-lived tray icon (Windows Forms ships with Windows PowerShell).
+function Show-Alert($text) {
+  try {
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    if (-not $script:notifyIcon) {
+      $icon = [Windows.Forms.NotifyIcon]::new()
+      $iconPath = Join-Path $script:root 'claude.ico'
+      $icon.Icon = if (Test-Path -LiteralPath $iconPath) { [Drawing.Icon]::new($iconPath) } else { [Drawing.SystemIcons]::Information }
+      $icon.Visible = $true
+      $script:notifyIcon = $icon
+    }
+    $script:notifyIcon.ShowBalloonTip(6000, 'Claude allowance', $text, [Windows.Forms.ToolTipIcon]::Info)
+    $script:notifyHideAt = [DateTime]::UtcNow.AddSeconds(12)
+  } catch { }
+}
+
+function Remove-AlertIcon {
+  if ($script:notifyIcon) { try { $script:notifyIcon.Visible = $false; $script:notifyIcon.Dispose() } catch { } }
+  $script:notifyIcon = $null
+  $script:notifyHideAt = [DateTime]::MaxValue
 }
 
 function Start-Worker {
@@ -274,6 +362,7 @@ try {
       $script:window.Left = [Math]::Max($area.Left, [Math]::Min($area.Right - $script:window.Width, [double]$settings.left))
       $script:window.Top = [Math]::Max($area.Top, [Math]::Min($area.Bottom - $script:window.Height, [double]$settings.top))
       $script:window.Topmost = [bool]$settings.topmost
+      if ($null -ne $settings.notifications) { $script:notify = [bool]$settings.notifications }
     } catch { }
   }
 
@@ -288,6 +377,13 @@ try {
       windows = @(
         [pscustomobject]@{remainingPercent = $v1; resetsAt = $now.AddMinutes(177).ToString('o'); expired = ($PreviewState -eq 'expired'); tokensUsed = $(if ($PreviewState -eq 'zero') { 0 } else { 1240000 })},
         [pscustomobject]@{remainingPercent = $v2; resetsAt = $now.AddDays(4).AddHours(2).ToString('o'); expired = $false; tokensUsed = 0; tokensLeft = [int](16700000 * $v2 / 100)})
+    }
+    if ($PreviewState -eq 'insights') {
+      $script:snapshot.windows += [pscustomobject]@{label = 'Model'; remainingPercent = 38; resetsAt = $now.AddDays(3).ToString('o'); expired = $false}
+      $script:snapshot | Add-Member -NotePropertyName checkedAt -NotePropertyValue $now.ToString('o')
+      $script:snapshot | Add-Member -NotePropertyName insights -NotePropertyValue ([pscustomobject]@{
+        pace = @([pscustomobject]@{burnPctPerHour = 40; minutesToLimit = 100; beforeReset = $true}, [pscustomobject]@{burnPctPerHour = 0.5; minutesToLimit = $null; beforeReset = $null})
+        peak = [pscustomobject]@{inPeak = $true; minutesUntilEnd = 150} })
     }
     if ($PreviewState -eq 'unknown') { $script:snapshot.windows = @($null, $null); $script:snapshot.observedAt = $null }
     if ($PreviewState -eq 'expired') { $script:snapshot.windows[0].resetsAt = $now.AddSeconds(-1).ToString('o') }
@@ -307,6 +403,10 @@ try {
   $pin.Header = 'Always on top'; $pin.IsCheckable = $true; $pin.IsChecked = $script:window.Topmost
   $pin.Add_Click({ $script:window.Topmost = $pin.IsChecked; Save-Settings })
   $menu.Items.Add($pin) | Out-Null
+  $alerts = [Windows.Controls.MenuItem]::new()
+  $alerts.Header = 'Notifications (75% / 90% used)'; $alerts.IsCheckable = $true; $alerts.IsChecked = $script:notify
+  $alerts.Add_Click({ $script:notify = $alerts.IsChecked; Save-Settings })
+  $menu.Items.Add($alerts) | Out-Null
   $startup = [Windows.Controls.MenuItem]::new()
   $startup.Header = 'Start with Windows'; $startup.IsCheckable = $true
   $startup.IsChecked = [bool](Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ClaudeUsageWidget' -ErrorAction SilentlyContinue).ClaudeUsageWidget
@@ -358,6 +458,11 @@ try {
         if ($line) {
           $script:snapshot = $line | ConvertFrom-Json
           $script:disconnected = $false
+          if ($script:notify) {
+            foreach ($alert in @($script:snapshot.alerts)) {
+              if ($alert) { Show-Alert ('{0} allowance: {1:0.#}% left' -f $alert.window, $alert.remainingPercent) }
+            }
+          }
           Render-Usage
           $script:pendingLine = $script:worker.StandardOutput.ReadLineAsync()
         }
@@ -372,6 +477,7 @@ try {
         $isIdle = (Get-IdleSeconds) -ge 300
         if ($isIdle -ne $script:idleSent) { $script:idleSent = $isIdle; Send-Worker $(if ($isIdle) { 'idle' } else { 'active' }) }
       }
+      if ([DateTime]::UtcNow -ge $script:notifyHideAt) { Remove-AlertIcon }
       if (([DateTime]::UtcNow - $script:lastThemeCheck).TotalSeconds -ge 3) {
         Set-Theme (Get-SystemTheme)
         $script:lastThemeCheck = [DateTime]::UtcNow
@@ -390,7 +496,7 @@ try {
       $script:window.FindName('StatusText').Text = 'Reader unavailable - retrying'
     }
   })
-  $script:window.Add_Closed({ $timer.Stop(); Save-Settings })
+  $script:window.Add_Closed({ $timer.Stop(); Remove-AlertIcon; Save-Settings })
   $timer.Start()
   $script:window.Add_Loaded({ Write-Diagnostic ('Loaded; visible=' + $script:window.IsVisible) })
   $script:window.Add_ContentRendered({ Write-Diagnostic ('Rendered; visible=' + $script:window.IsVisible) })

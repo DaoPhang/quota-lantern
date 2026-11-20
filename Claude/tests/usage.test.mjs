@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { normalizeUsage, normalizeWindow, loadLastKnown, createUsageReader, WEEKLY_TOKEN_ESTIMATE } from '../usage.mjs';
+import { normalizeUsage, normalizeWindow, normalizeScoped, loadLastKnown, createUsageReader, WEEKLY_TOKEN_ESTIMATE } from '../usage.mjs';
 import { createTokenCounter } from '../tokens.mjs';
 
 const now = Date.parse('2026-11-03T05:00:00Z');
@@ -176,5 +176,47 @@ test('a reading younger than the requested age is reused without calling the ser
     await read();
     await read(60000);
     assert.equal(calls, 1);
+  } finally { globalThis.fetch = realFetch; await rm(dir, { recursive: true, force: true }); }
+});
+
+const scopedEntry = (name, percent, resets_at = future) => ({ kind: 'weekly_scoped', percent, resets_at, scope: { model: { display_name: name } } });
+
+test('the model-scoped weekly window is added only when the service reports one, highest use first', () => {
+  const base = { five_hour: { utilization: 10, resets_at: future }, seven_day: { utilization: 20, resets_at: future } };
+  assert.equal(normalizeUsage(base, 'live', new Date(now).toISOString(), now).windows.length, 2);
+  const usage = normalizeUsage({ ...base, limits: [scopedEntry('Alpha', 30), scopedEntry('Beta', 60), { kind: 'other', percent: 99 }] },
+    'live', new Date(now).toISOString(), now);
+  assert.equal(usage.windows.length, 3);
+  assert.equal(usage.windows[2].label, 'Beta');
+  assert.equal(usage.windows[2].remainingPercent, 40);
+  assert.equal(usage.windows[2].tokensLeft, null);
+  assert.equal(usage.windows[1].remainingPercent, 80);
+});
+
+test('malformed scoped entries are ignored and an expired scoped reset stays unknown', () => {
+  assert.equal(normalizeScoped([{ kind: 'weekly_scoped', percent: 'x', scope: { model: { display_name: 'A' } } },
+    { kind: 'weekly_scoped', percent: 10, scope: {} }, null], now), null);
+  assert.equal(normalizeScoped(undefined, now), null);
+  const expired = normalizeScoped([scopedEntry('Beta', 60, new Date(now - 1000).toISOString())], now);
+  assert.equal(expired.remainingPercent, null);
+  assert.equal(expired.expired, true);
+});
+
+test('the scoped window survives the last-known cache without tokens counted for it', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'claude-usage-'));
+  const realFetch = globalThis.fetch;
+  try {
+    await writeFile(join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'x', expiresAt: Date.now() + 1e9 } }));
+    const soon = new Date(Date.now() + 3600000).toISOString();
+    globalThis.fetch = async () => new Response(JSON.stringify({ five_hour: { utilization: 20, resets_at: soon },
+      seven_day: { utilization: 5, resets_at: soon }, limits: [scopedEntry('Beta', 40, soon)] }), { status: 200 });
+    const file = join(dir, 'cache.json');
+    const live = await createUsageReader(dir, file)(0);
+    assert.equal(live.windows[2].remainingPercent, 60);
+    assert.equal(live.windows[2].tokensUsed, null);
+    const saved = JSON.parse(await readFile(file, 'utf8'));
+    assert.deepEqual(Object.keys(saved.raw.limits[0]).sort(), ['kind', 'percent', 'resets_at', 'scope']);
+    const restored = await loadLastKnown(file);
+    assert.equal(restored.windows[2].label, 'Beta');
   } finally { globalThis.fetch = realFetch; await rm(dir, { recursive: true, force: true }); }
 });

@@ -68,10 +68,17 @@
       </Grid>
       <Grid Grid.Row="1" x:Name="DetailsPanel" Visibility="Collapsed" Height="52" Margin="16,0,16,0">
         <Grid.RowDefinitions>
-          <RowDefinition Height="1"/><RowDefinition Height="*"/>
+          <RowDefinition Height="1"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/>
         </Grid.RowDefinitions>
         <Rectangle Fill="{DynamicResource Divider}"/>
-        <Grid Grid.Row="1" VerticalAlignment="Center">
+        <!-- Optional insight rows (model weekly, pace, peak hours). Each is collapsed until it has a known value. -->
+        <StackPanel Grid.Row="1" Margin="0,4,0,0">
+          <TextBlock x:Name="ScopedText" Visibility="Collapsed" Height="18" Foreground="{DynamicResource TextSecondary}" FontSize="11" TextTrimming="CharacterEllipsis"/>
+          <TextBlock x:Name="PacePrimaryText" Visibility="Collapsed" Height="18" Foreground="{DynamicResource TextSecondary}" FontSize="11" TextTrimming="CharacterEllipsis"/>
+          <TextBlock x:Name="PaceWeeklyText" Visibility="Collapsed" Height="18" Foreground="{DynamicResource TextSecondary}" FontSize="11" TextTrimming="CharacterEllipsis"/>
+          <TextBlock x:Name="PeakText" Visibility="Collapsed" Height="18" Foreground="{DynamicResource TextSecondary}" FontSize="11" TextTrimming="CharacterEllipsis"/>
+        </StackPanel>
+        <Grid Grid.Row="2" VerticalAlignment="Center">
           <TextBlock x:Name="StatusText" Text="Connecting..." Foreground="{DynamicResource TextSecondary}" FontSize="11" MaxWidth="150" HorizontalAlignment="Left" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
           <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
             <Button x:Name="MenuButton" Content="&#x22EF;" ToolTip="Widget options" AutomationProperties.Name="Widget options" Margin="0,0,4,0"/>

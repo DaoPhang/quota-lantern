@@ -6,6 +6,7 @@ widget-settings.json
 widget-runtime.json
 widget-error.log
 usage-cache.json
+alerts-state.json
 *.log
 
 # Build output (rebuild with build-launcher.ps1)
